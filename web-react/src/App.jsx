@@ -306,10 +306,12 @@ function App() {
   const [newProjectAddress, setNewProjectAddress] = useState('')
   const [newProjectPhone, setNewProjectPhone] = useState('')
 
-  // Image detail view state: { post, document }
+  // Image detail view state:  // Image detail & comments
   const [imageDetail, setImageDetail] = useState(null)
   const [imageComments, setImageComments] = useState([])
   const [imageCommentText, setImageCommentText] = useState('')
+  const [touchStart, setTouchStart] = useState(null)
+  const [touchEnd, setTouchEnd] = useState(null)
 
   // Forum composer state
   const [showComposer, setShowComposer] = useState(false)
@@ -751,8 +753,22 @@ function App() {
   const showToast = (text, type = 'success') => { setMessage({ text, type }); setTimeout(() => setMessage(null), 3000) }
 
   // ── Image Detail ──
-  const openImageDetail = async (post, doc) => {
-    setImageDetail({ post, document: doc })
+  const openImageDetail = async (post, doc, docList) => {
+    let list = docList || []
+    if (list.length === 0) {
+      if (selectedProject?.name !== 'Geral' && obraTab === 'fotos') {
+        list = projectDocs.filter(d => isImage(d)).map(d => ({
+          post: forumPosts.find(p => p.message_type === 'PHOTO' && p.document?.id === d.id) || { author_name: d.author_name, created_at: d.created_at },
+          document: d
+        }))
+      } else {
+        list = forumPosts.filter(p => p.message_type === 'PHOTO' && p.document).map(p => ({
+          post: p, document: p.document
+        }))
+      }
+    }
+    const idx = list.findIndex(item => item.document.id === doc.id)
+    setImageDetail({ post, document: doc, list, index: Math.max(0, idx) })
     setImageComments([])
     setImageCommentText('')
     if (post?.id) {
@@ -760,6 +776,33 @@ function App() {
         const res = await apiFetch(`${API_BASE}/forum/${post.id}/replies`)
         if (res.ok) setImageComments(await res.json())
       } catch {}
+    }
+  }
+
+  const [swipeAnim, setSwipeAnim] = useState('')
+
+  const handleTouchStart = (e) => {
+    setTouchEnd(null)
+    setTouchStart(e.targetTouches[0].clientX)
+  }
+
+  const handleTouchMove = (e) => setTouchEnd(e.targetTouches[0].clientX)
+
+  const handleTouchEnd = () => {
+    if (!touchStart || !touchEnd) return
+    const distance = touchStart - touchEnd
+    const isLeftSwipe = distance > 50
+    const isRightSwipe = distance < -50
+    
+    if (isLeftSwipe && imageDetail?.list && imageDetail.index < imageDetail.list.length - 1) {
+      const next = imageDetail.list[imageDetail.index + 1]
+      setSwipeAnim('swipe-left')
+      setTimeout(() => { openImageDetail(next.post, next.document, imageDetail.list); setSwipeAnim('') }, 150)
+    }
+    if (isRightSwipe && imageDetail?.list && imageDetail.index > 0) {
+      const prev = imageDetail.list[imageDetail.index - 1]
+      setSwipeAnim('swipe-right')
+      setTimeout(() => { openImageDetail(prev.post, prev.document, imageDetail.list); setSwipeAnim('') }, 150)
     }
   }
 
@@ -1128,86 +1171,135 @@ function App() {
                     <div className="empty-state small"><p>Sem publicações nesta obra.</p></div>
                   )}
 
-                  {forumPosts.map(post => (
-                    <div key={post.id} className="post-card">
-                      {/* Post header */}
-                      <div className="post-header">
-                        <Avatar name={post.author_name} size={32} profiles={userProfiles} />
-                        <div className="post-meta">
-                          <strong>{post.author_name || 'Anónimo'}</strong>
-                          <span>{formatTime(post.created_at)}</span>
-                        </div>
-                      </div>
+                  {(() => {
+                    const groupedForumPosts = []
+                    let currentGroup = null
+                    for (const post of forumPosts) {
+                      if (post.message_type === 'PHOTO' && post.document && post.reply_count === 0 && !post.content) {
+                        if (currentGroup && currentGroup.type === 'PHOTO_GROUP' && currentGroup.author_name === post.author_name) {
+                          const timeDiff = new Date(post.created_at + 'Z') - new Date(currentGroup.last_time + 'Z')
+                          if (timeDiff >= 0 && timeDiff < 15 * 60 * 1000) {
+                            currentGroup.posts.push(post)
+                            currentGroup.last_time = post.created_at
+                            continue
+                          }
+                        }
+                        if (currentGroup) groupedForumPosts.push(currentGroup)
+                        currentGroup = {
+                          type: 'PHOTO_GROUP',
+                          id: `group-${post.id}`,
+                          author_name: post.author_name,
+                          created_at: post.created_at,
+                          last_time: post.created_at,
+                          posts: [post]
+                        }
+                      } else {
+                        if (currentGroup) { groupedForumPosts.push(currentGroup); currentGroup = null }
+                        groupedForumPosts.push({ type: 'SINGLE', id: post.id, post: post })
+                      }
+                    }
+                    if (currentGroup) groupedForumPosts.push(currentGroup)
 
-                      {/* Post content */}
-                      {post.message_type === 'TEXT' && (
-                        <div className="post-body"><Linkify text={post.content} /></div>
-                      )}
+                    return groupedForumPosts.map(group => {
+                      const isGroup = group.type === 'PHOTO_GROUP'
+                      const mainPost = isGroup ? group.posts[0] : group.post
 
-                      {post.message_type === 'PHOTO' && post.document && (
-                        <div className="post-body">
-                          <div className="post-photo" onClick={() => openImageDetail(post, post.document)}>
-                            <img src={post.document.file_url} alt={post.document.original_name} loading="lazy" />
+                      return (
+                        <div key={group.id} className="post-card">
+                          <div className="post-header">
+                            <Avatar name={mainPost.author_name} size={32} profiles={userProfiles} />
+                            <div className="post-meta">
+                              <strong>{mainPost.author_name || 'Anónimo'}</strong>
+                              <span>{formatTime(mainPost.created_at)}</span>
+                            </div>
                           </div>
-                        </div>
-                      )}
 
-                      {post.message_type === 'VOICE' && post.audio_url && (
-                        <div className="post-body">
-                          {post.content && <p className="voice-message-text"><Linkify text={post.content} /></p>}
-                          <AudioPlayer src={post.audio_url} />
-                        </div>
-                      )}
+                          {/* TEXT */}
+                          {group.type === 'SINGLE' && mainPost.message_type === 'TEXT' && (
+                            <div className="post-body"><Linkify text={mainPost.content} /></div>
+                          )}
 
-                      {post.message_type === 'TASK_LIST' && (
-                        <div className="post-body">
-                          {post.content && <div className="tasklist-title">{post.content}</div>}
-                          <div className="tasklist">
-                            {post.items?.map(item => (
-                              <label key={item.id} className={`task-item ${item.completed ? 'done' : ''}`}>
-                                <input type="checkbox" checked={item.completed} onChange={() => toggleTaskItem(item.id)} />
-                                <span className="task-text">{item.text}</span>
-                                {item.completed_by && <span className="task-by">{item.completed_by}</span>}
-                              </label>
-                            ))}
-                          </div>
-                        </div>
-                      )}
-
-                      {/* Replies section */}
-                      <div className="post-footer">
-                        <button className="reply-toggle" onClick={() => toggleReplies(post.id)}>
-                          <IconReply />
-                          <span>{post.reply_count > 0 ? `${post.reply_count} resposta${post.reply_count !== 1 ? 's' : ''}` : 'Responder'}</span>
-                        </button>
-                      </div>
-
-                      {expandedReplies[post.id] && (
-                        <div className="replies-section">
-                          {(postReplies[post.id] || []).map(reply => (
-                            <div key={reply.id} className="reply-item">
-                              <Avatar name={reply.author_name} size={28} profiles={userProfiles} />
-                              <div className="reply-content">
-                                <div className="reply-meta">
-                                  <strong>{reply.author_name || 'Anónimo'}</strong>
-                                  <span>{formatTime(reply.created_at)}</span>
-                                </div>
-                                <p>{reply.content}</p>
+                          {/* SINGLE PHOTO / Content Photo / Replied Photo */}
+                          {(group.type === 'SINGLE' && mainPost.message_type === 'PHOTO' && mainPost.document) || (group.type === 'PHOTO_GROUP' && group.posts.length === 1) ? (
+                            <div className="post-body">
+                              {mainPost.content && <p className="voice-message-text"><Linkify text={mainPost.content} /></p>}
+                              <div className="post-photo" onClick={() => openImageDetail(mainPost, mainPost.document, [{post: mainPost, document: mainPost.document}])}>
+                                <img src={mainPost.document.file_url} alt={mainPost.document.original_name} loading="lazy" />
                               </div>
                             </div>
-                          ))}
+                          ) : null}
 
-                          <div className="reply-input-row">
-                            <input type="text" value={replyTexts[post.id] || ''} onChange={e => setReplyTexts(prev => ({ ...prev, [post.id]: e.target.value }))}
-                              placeholder="Escrever resposta..." onKeyDown={e => { if (e.key === 'Enter') submitReply(post.id) }} />
-                            <button className="btn-send" onClick={() => submitReply(post.id)} disabled={!(replyTexts[post.id] || '').trim()}>
-                              Enviar
+                          {/* PHOTO GROUP GRID (>1) */}
+                          {group.type === 'PHOTO_GROUP' && group.posts.length > 1 && (
+                            <div className="post-body">
+                              <div className="photo-gallery-grid">
+                                {group.posts.map(p => (
+                                  <div key={p.id} className="post-photo gallery-item" onClick={() => openImageDetail(p, p.document, group.posts.map(g => ({post: g, document: g.document})))}>
+                                    <img src={p.document.file_url} alt={p.document.original_name} loading="lazy" />
+                                  </div>
+                                ))}
+                              </div>
+                            </div>
+                          )}
+
+                          {/* VOICE */}
+                          {group.type === 'SINGLE' && mainPost.message_type === 'VOICE' && mainPost.audio_url && (
+                            <div className="post-body">
+                              {mainPost.content && <p className="voice-message-text"><Linkify text={mainPost.content} /></p>}
+                              <AudioPlayer src={mainPost.audio_url} />
+                            </div>
+                          )}
+
+                          {/* TASK LIST */}
+                          {group.type === 'SINGLE' && mainPost.message_type === 'TASK_LIST' && (
+                            <div className="post-body">
+                              {mainPost.content && <div className="tasklist-title">{mainPost.content}</div>}
+                              <div className="tasklist">
+                                {mainPost.items?.map(item => (
+                                  <label key={item.id} className={`task-item ${item.completed ? 'done' : ''}`}>
+                                    <input type="checkbox" checked={item.completed} onChange={() => toggleTaskItem(item.id)} />
+                                    <span className="task-text">{item.text}</span>
+                                    {item.completed_by && <span className="task-by">{item.completed_by}</span>}
+                                  </label>
+                                ))}
+                              </div>
+                            </div>
+                          )}
+
+                          {/* Replies footer */}
+                          <div className="post-footer">
+                            <button className="reply-toggle" onClick={() => toggleReplies(mainPost.id)}>
+                              <IconReply />
+                              <span>{mainPost.reply_count > 0 ? `${mainPost.reply_count} resposta${mainPost.reply_count !== 1 ? 's' : ''}` : 'Responder'}</span>
                             </button>
                           </div>
+
+                          {expandedReplies[mainPost.id] && (
+                            <div className="replies-section">
+                              {(postReplies[mainPost.id] || []).map(reply => (
+                                <div key={reply.id} className="reply-item">
+                                  <Avatar name={reply.author_name} size={28} profiles={userProfiles} />
+                                  <div className="reply-content">
+                                    <div className="reply-meta">
+                                      <strong>{reply.author_name || 'Anónimo'}</strong>
+                                      <span>{formatTime(reply.created_at)}</span>
+                                    </div>
+                                    <p>{reply.content}</p>
+                                  </div>
+                                </div>
+                              ))}
+
+                              <div className="reply-input-row">
+                                <input type="text" value={replyTexts[mainPost.id] || ''} onChange={e => setReplyTexts(prev => ({ ...prev, [mainPost.id]: e.target.value }))}
+                                  placeholder="Escrever resposta..." onKeyDown={e => { if (e.key === 'Enter') submitReply(mainPost.id) }} />
+                                <button onClick={() => submitReply(mainPost.id)} disabled={!(replyTexts[mainPost.id] || '').trim()}>Enviar</button>
+                              </div>
+                            </div>
+                          )}
                         </div>
-                      )}
-                    </div>
-                  ))}
+                      )
+                    })
+                  })()}
                   <div ref={forumEndRef} />
                 </div>
               )}
@@ -1339,7 +1431,7 @@ function App() {
 
       {/* Image Detail View */}
       {imageDetail && (
-        <div className="image-detail-page">
+        <div className="image-detail-page" onTouchStart={handleTouchStart} onTouchMove={handleTouchMove} onTouchEnd={handleTouchEnd}>
           <div className="image-detail-header">
             <div className="image-detail-author">
               <Avatar name={imageDetail.post?.author_name} profiles={userProfiles} />
@@ -1348,10 +1440,13 @@ function App() {
                 <span className="post-time">{formatTime(imageDetail.post?.created_at)}</span>
               </div>
             </div>
+            {imageDetail.list?.length > 1 && (
+              <span className="image-progress">{imageDetail.index + 1} / {imageDetail.list.length}</span>
+            )}
             <button className="image-detail-close" onClick={closeImageDetail}>Fechar</button>
           </div>
 
-          <div className="image-detail-body">
+          <div className={`image-detail-body ${swipeAnim}`}>
             <img src={imageDetail.document?.file_url} alt={imageDetail.document?.original_name} />
           </div>
 
